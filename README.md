@@ -8,11 +8,11 @@ The current local install build is [Hirang APK](build/app/outputs/flutter-apk/hi
 
 **Keep the memories. Clear the clutter.** · 22 seconds
 
-<a href="docs/media/Hirang-keep-the-memory.mp4?raw=true">
-  <img src="docs/media/Hirang-keep-the-memory-cover.jpg" alt="Hirang — Keep the memories. Clear the clutter. Watch the 22-second ad." width="280">
+<a href="https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/Hirang-keep-the-memory.mp4">
+  <img src="docs/media/Hirang-keep-the-memory-cover.jpg" alt="Hirang — Keep the memories. Clear the clutter. Download the 22-second ad (MP4)." width="280">
 </a>
 
-[▶ Watch the ad (MP4)](docs/media/Hirang-keep-the-memory.mp4?raw=true) · [Caption and credits](docs/media/Hirang-caption-and-credits.txt)
+[Download the ad (MP4)](https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/Hirang-keep-the-memory.mp4) · [View file on GitHub](docs/media/Hirang-keep-the-memory.mp4) · [Caption and credits](docs/media/Hirang-caption-and-credits.txt)
 
 Music: “Happy Beats & Business Moves Vol. 10” by Sascha Ende, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, normalized, faded and mixed for this ad.
 
