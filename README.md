@@ -6,15 +6,19 @@ The current local install build is [Hirang APK](build/app/outputs/flutter-apk/hi
 
 ## Watch the ad
 
-**Keep the memories. Clear the clutter.** · 22 seconds
+**Breathing room** · 24 seconds
 
-<a href="https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/Hirang-keep-the-memory.mp4">
-  <img src="docs/media/Hirang-keep-the-memory-cover.jpg" alt="Hirang — Keep the memories. Clear the clutter. Download the 22-second ad (MP4)." width="280">
+<a href="https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/ads/Hirang-Breathing-Room.mp4">
+  <img src="docs/media/ads/Hirang-Breathing-Room-cover.jpg" alt="Hirang — Breathing room. Open the 24-second ad (MP4)." width="280">
 </a>
 
-[Download the ad (MP4)](https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/Hirang-keep-the-memory.mp4) · [View file on GitHub](docs/media/Hirang-keep-the-memory.mp4) · [Caption and credits](docs/media/Hirang-caption-and-credits.txt)
+[Watch or download the ad (MP4)](https://raw.githubusercontent.com/FrancisGiann/Hirang-Swipe-Photo-Cleaner/main/docs/media/ads/Hirang-Breathing-Room.mp4) · [View file on GitHub](docs/media/ads/Hirang-Breathing-Room.mp4) · [Caption and credits](docs/media/ads/Hirang-Breathing-Room-caption.txt)
 
-Music: “Happy Beats & Business Moves Vol. 10” by Sascha Ende, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, normalized, faded and mixed for this ad.
+Actual app widgets show Keep, Mark, marked review and app confirmation using licensed stock photos and staged records. Marking alone does not free storage; clearing system trash in your gallery reclaims space.
+
+Music: [Airport Lounge](https://incompetech.com/music/royalty-free/index.html?Search=Search&isrc=USUAN1100806) by Kevin MacLeod ([incompetech.com](https://incompetech.com/)), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, normalized, faded and mixed. Full credits are linked above.
+
+Photos by [Burcufilms](https://www.pexels.com/photo/overhead-shot-of-a-table-with-a-bouquet-of-flowers-and-cups-of-coffee-14838543/), [Esra Nur Kalay](https://www.pexels.com/photo/close-up-of-coffee-and-bouquet-of-flowers-15278356/) and [Eugenia Remark](https://www.pexels.com/photo/bottles-of-flowers-on-cafe-tables-26268972/) via Pexels, under the [Pexels License](https://www.pexels.com/license/). No endorsement is implied.
 
 ## Install or update on your phone
 

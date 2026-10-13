@@ -1,0 +1,10 @@
+Hirang. Review what stays and what goes, privately and offline. Download for Android. To reclaim storage, clear system trash in your gallery; marking alone does not free space.
+
+"Airport Lounge" Kevin MacLeod (incompetech.com)
+Licensed under Creative Commons: By Attribution 4.0 License
+https://creativecommons.org/licenses/by/4.0/
+Source: https://incompetech.com/music/royalty-free/index.html?Search=Search&isrc=USUAN1100806
+Music was trimmed, normalized, faded and mixed.
+
+UI icons: Google Material Icons, CC BY 4.0 (rendered in staged Flutter widget captures): https://creativecommons.org/licenses/by/4.0/.
+Photos by Burcufilms, Esra Nur Kalay and Eugenia Remark via Pexels. Licensed promotional use; no endorsement. See source-evidence/PHOTO-SOURCES.md.
