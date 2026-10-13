@@ -4,6 +4,18 @@ An Android photo cleaner that keeps review decisions on your device. Swipe left 
 
 The current local install build is [Hirang APK](build/app/outputs/flutter-apk/hirang-1.0.4-photo-loading.apk), version **1.0.4 (5)**. It is an ARM64 release build signed with the same existing local development key as the previous build. The package version was not bumped. The historical [1.0.4 themes APK](build/app/outputs/flutter-apk/hirang-1.0.4-themes.apk) remains preserved separately. No store signing credentials or publication were created.
 
+## Watch the ad
+
+**Keep the memories. Clear the clutter.** · 22 seconds
+
+<a href="docs/media/Hirang-keep-the-memory.mp4?raw=true">
+  <img src="docs/media/Hirang-keep-the-memory-cover.jpg" alt="Hirang — Keep the memories. Clear the clutter. Watch the 22-second ad." width="280">
+</a>
+
+[▶ Watch the ad (MP4)](docs/media/Hirang-keep-the-memory.mp4?raw=true) · [Caption and credits](docs/media/Hirang-caption-and-credits.txt)
+
+Music: “Happy Beats & Business Moves Vol. 10” by Sascha Ende, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Trimmed, normalized, faded and mixed for this ad.
+
 ## Install or update on your phone
 
 1. Connect the unlocked phone to this computer by USB and select **File Transfer** on the phone. See [Android's USB transfer guide](https://support.google.com/android/answer/9064445?hl=en).
