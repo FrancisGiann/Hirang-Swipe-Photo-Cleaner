@@ -114,6 +114,15 @@ class MainActivity : FlutterActivity() {
             "queryPhotos" -> runIo(result) {
                 if (!hasPhotoReadAccess()) emptyList<Map<String, Any?>>() else queryPhotos()
             }
+            "queryPhotoPage" -> runIo(result) {
+                val mode = call.argument<String>("mode")?.takeIf { it in setOf(
+                    "recent", "largestKnown", "unknownSize", "screenshotHints",
+                ) } ?: return@runIo mapOf("status" to "unsupported", "items" to emptyList<Any>())
+                val cursor = call.argument<String>("cursor")
+                val pageSize = (call.argument<Int>("pageSize") ?: 40).coerceIn(1, 80)
+                val filters = call.argument<Map<String, Any?>>("filters") ?: emptyMap()
+                queryPhotoPage(mode, cursor, pageSize, filters)
+            }
             "loadThumbnail" -> {
                 val args = call.argument<Map<String, Any?>>("asset")
                     ?: run {
@@ -279,7 +288,22 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun queryPhotos(): List<Map<String, Any?>> {
-        val rows = mutableListOf<Map<String, Any?>>()
+        @Suppress("UNCHECKED_CAST")
+        return (queryPhotoPage("recent", null, 60, emptyMap())["items"]
+            as? List<Map<String, Any?>>).orEmpty()
+    }
+
+    /** Reads one bounded page of metadata; media bytes are never opened here. */
+    private fun queryPhotoPage(
+        mode: String,
+        cursorToken: String?,
+        requestedPageSize: Int,
+        filters: Map<String, Any?>,
+    ): Map<String, Any?> {
+        if (!hasPhotoReadAccess()) return mapOf(
+            "status" to "denied", "items" to emptyList<Any>(), "hasMore" to false,
+        )
+        val pageSize = requestedPageSize.coerceIn(1, 80)
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
@@ -297,81 +321,247 @@ class MainActivity : FlutterActivity() {
         val volumes = try {
             MediaStore.getExternalVolumeNames(this).sorted()
         } catch (_: SecurityException) {
-            emptyList()
+            return mapOf("status" to "denied", "items" to emptyList<Any>(), "hasMore" to false)
         }
-        for (volume in volumes) {
-            val collection = MediaStore.Images.Media.getContentUri(volume)
-            val volumeVersion = try {
-                MediaStore.getVersion(this, volume)
-            } catch (_: Exception) {
-                null
+        if (volumes.isEmpty()) return mapOf("status" to "partial", "items" to emptyList<Any>(), "hasMore" to false)
+
+        val snapshots = mutableListOf<String>()
+        val pageVersions = mutableMapOf<String, String>()
+        try {
+            for (volume in volumes) {
+                val version = MediaStore.getVersion(this, volume).takeIf { it.isNotBlank() }
+                    ?: return mapOf("status" to "partial", "items" to emptyList<Any>(), "hasMore" to false)
+                pageVersions[volume] = version
+                val generation = MediaStore.getGeneration(this, volume)
+                snapshots.add("$volume:$version:$generation")
             }
-            if (volumeVersion.isNullOrBlank()) continue
-            val query = Bundle().apply {
-                putString(ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.MediaColumns.IS_TRASHED} = ?")
-                putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf("0"))
-                putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
-                    "${MediaStore.Images.Media.DATE_TAKEN} DESC, ${MediaStore.Images.Media.DATE_ADDED} DESC")
-                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStoreIdentity.MATCH_EXCLUDE)
-            }
+        } catch (_: SecurityException) {
+            return mapOf("status" to "denied", "items" to emptyList<Any>(), "hasMore" to false)
+        } catch (_: Exception) {
+            return mapOf("status" to "partial", "items" to emptyList<Any>(), "hasMore" to false)
+        }
+        val snapshotSignature = snapshots.sorted().joinToString("|")
+        val monthKey = filters["monthKey"] as? String
+        val album = filters["album"] as? String
+        val screenshotsOnly = filters["screenshotsOnly"] == true
+        val filterKey = "$monthKey|$album|$screenshotsOnly"
+        var offset = 0
+        var previousSortValue: Long? = null
+        var previousSecondarySortValue: Long? = null
+        var previousVolume: String? = null
+        var previousId: Long? = null
+        if (!cursorToken.isNullOrBlank()) {
             try {
-                contentResolver.query(collection, projection, query, null)?.use { cursor ->
-                    val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    val nameColumn = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-                    val mimeColumn = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
-                    val takenColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
-                    val addedColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
-                    val sizeColumn = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
-                    val bucketColumn = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                    val pathColumn = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
-                    val volumeColumn = cursor.getColumnIndex(MediaStore.Images.Media.VOLUME_NAME)
-                    val generationAddedColumn = cursor.getColumnIndex(MediaStore.MediaColumns.GENERATION_ADDED)
-                    val generationModifiedColumn = cursor.getColumnIndex(MediaStore.MediaColumns.GENERATION_MODIFIED)
-                    while (cursor.moveToNext()) {
-                        val id = cursor.getLong(idColumn)
-                        val rowVolume = stringAt(cursor, volumeColumn) ?: volume
-                        val rowVersion = try { MediaStore.getVersion(this, rowVolume) } catch (_: Exception) { null }
-                        val generationAdded = nullableLongAt(cursor, generationAddedColumn)
-                        val generationModified = nullableLongAt(cursor, generationModifiedColumn)
-                        if (rowVersion.isNullOrBlank() || generationAdded == null || generationModified == null) continue
-                        val uri = ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(rowVolume), id)
-                        val displayName = stringAt(cursor, nameColumn) ?: "Untitled photo"
-                        val relativePath = stringAt(cursor, pathColumn)
-                        val album = stringAt(cursor, bucketColumn)
-                        val pathHint = "${relativePath.orEmpty()} ${album.orEmpty()}".lowercase()
-                        val rawTaken = longAt(cursor, takenColumn)
-                        val addedSeconds = longAt(cursor, addedColumn)
-                        val captureMillis = rawTaken.takeIf { it > 0L }
-                            ?: addedSeconds.takeIf { it > 0L }?.times(1000L)
-                        val stableId = "$uri#version=${Uri.encode(rowVersion)}&added=$generationAdded"
-                        rows.add(
-                            mapOf(
-                                "id" to stableId,
-                                "uri" to uri.toString(),
-                                "volumeName" to rowVolume,
-                                "volumeVersion" to rowVersion,
-                                "mediaId" to id,
-                                "generationAdded" to generationAdded,
-                                "generationModified" to generationModified,
-                                "title" to displayName,
-                                "album" to album,
-                                "relativePath" to relativePath,
-                                "dateTakenMillis" to captureMillis,
-                                "sizeBytes" to longAt(cursor, sizeColumn).takeIf { it > 0L },
-                                "screenshotHeuristic" to pathHint.contains("screenshot"),
-                                "mimeType" to stringAt(cursor, mimeColumn),
-                            ),
+                val token = JSONObject(cursorToken)
+                if (token.optString("mode") != mode || token.optString("filterKey") != filterKey ||
+                    token.optString("snapshot") != snapshotSignature) {
+                    return mapOf("status" to "stale", "items" to emptyList<Any>(), "hasMore" to false)
+                }
+                offset = token.getInt("offset").coerceAtLeast(0)
+                if (token.has("lastSort")) previousSortValue = token.getLong("lastSort")
+                if (token.has("lastSecondarySort")) previousSecondarySortValue = token.getLong("lastSecondarySort")
+                previousVolume = token.optString("lastVolume").takeIf { it.isNotEmpty() }
+                if (token.has("lastId")) previousId = token.getLong("lastId")
+            } catch (_: Exception) {
+                return mapOf("status" to "stale", "items" to emptyList<Any>(), "hasMore" to false)
+            }
+        }
+
+        val selection = mutableListOf("${MediaStore.MediaColumns.IS_TRASHED} = ?")
+        val selectionArgs = mutableListOf("0")
+        if (mode == "largestKnown") {
+            selection.add("${MediaStore.Images.Media.SIZE} > ?")
+            selectionArgs.add("0")
+        } else if (mode == "unknownSize") {
+            selection.add("(${MediaStore.Images.Media.SIZE} IS NULL OR ${MediaStore.Images.Media.SIZE} <= ?)")
+            selectionArgs.add("0")
+        }
+        if (mode == "screenshotHints" || screenshotsOnly) {
+            selection.add("(LOWER(COALESCE(${MediaStore.Images.Media.RELATIVE_PATH}, '')) LIKE ? OR LOWER(COALESCE(${MediaStore.Images.Media.BUCKET_DISPLAY_NAME}, '')) LIKE ?)")
+            selectionArgs.add("%screenshot%")
+            selectionArgs.add("%screenshot%")
+        }
+        if (!album.isNullOrBlank()) {
+            selection.add("${MediaStore.Images.Media.BUCKET_DISPLAY_NAME} = ?")
+            selectionArgs.add(album)
+        }
+        if (!monthKey.isNullOrBlank()) {
+            val month = try { java.time.YearMonth.parse(monthKey) } catch (_: Exception) {
+                return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false, "message" to "Invalid date filter.")
+            }
+            val zone = java.time.ZoneId.systemDefault()
+            val startMillis = month.atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
+            val endMillis = month.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
+            val startSeconds = startMillis / 1000L
+            val endSeconds = endMillis / 1000L
+            selection.add("((${MediaStore.Images.Media.DATE_TAKEN} >= ? AND ${MediaStore.Images.Media.DATE_TAKEN} < ?) OR ((${MediaStore.Images.Media.DATE_TAKEN} IS NULL OR ${MediaStore.Images.Media.DATE_TAKEN} <= 0) AND ${MediaStore.Images.Media.DATE_ADDED} >= ? AND ${MediaStore.Images.Media.DATE_ADDED} < ?))")
+            selectionArgs.addAll(listOf(startMillis.toString(), endMillis.toString(), startSeconds.toString(), endSeconds.toString()))
+        }
+        val query = Bundle().apply {
+            // MediaProvider appends one direction to the whole structured sort list. Use explicit
+            // SQL terms so each stable tie-breaker is descending. The capture-date expression
+            // matches the displayed effective date: DATE_TAKEN when known, else DATE_ADDED seconds.
+            putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, PhotoPageQueryContract.sortOrder(mode))
+            putInt(ContentResolver.QUERY_ARG_LIMIT, pageSize + 1)
+            putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection.joinToString(" AND "))
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, selectionArgs.toTypedArray())
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStoreIdentity.MATCH_EXCLUDE)
+        }
+        val rows = mutableListOf<Map<String, Any?>>()
+        var hasMore = false
+        var partial = false
+        var boundarySortValue: Long? = null
+        var boundarySecondarySortValue: Long? = null
+        var boundaryVolume: String? = null
+        var boundaryId: Long? = null
+        var boundaryIncomplete = false
+        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        try {
+            contentResolver.query(collection, projection, query, null)?.use { cursor ->
+                val honored = cursor.extras.getStringArray(ContentResolver.EXTRA_HONORED_ARGS)?.toSet().orEmpty()
+                val required = mutableSetOf(
+                    ContentResolver.QUERY_ARG_LIMIT,
+                    ContentResolver.QUERY_ARG_OFFSET,
+                    ContentResolver.QUERY_ARG_SQL_SELECTION,
+                    ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                    ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                )
+                if (!honored.containsAll(required)) {
+                    return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false,
+                        "message" to "MediaStore did not confirm bounded sorting and filtering.")
+                }
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val nameColumn = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                val mimeColumn = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+                val takenColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val addedColumn = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+                val sizeColumn = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
+                val bucketColumn = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                val pathColumn = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+                val volumeColumn = cursor.getColumnIndex(MediaStore.Images.Media.VOLUME_NAME)
+                val generationAddedColumn = cursor.getColumnIndex(MediaStore.MediaColumns.GENERATION_ADDED)
+                val generationModifiedColumn = cursor.getColumnIndex(MediaStore.MediaColumns.GENERATION_MODIFIED)
+                var rawCount = 0
+                while (rawCount <= pageSize && cursor.moveToNext()) {
+                    if (rawCount == pageSize) {
+                        hasMore = true
+                        break
+                    }
+                    rawCount++
+                    val id = cursor.getLong(idColumn)
+                    val rowVolume = stringAt(cursor, volumeColumn)
+                    val rawTaken = longAt(cursor, takenColumn)
+                    val addedSeconds = longAt(cursor, addedColumn)
+                    val sortValue = when (mode) {
+                        "largestKnown" -> longAt(cursor, sizeColumn)
+                        else -> PhotoPageQueryContract.effectiveCaptureMillis(rawTaken, addedSeconds)
+                    }
+                    val secondarySortValue = if (mode == "largestKnown") 0L else addedSeconds
+                    if (rowVolume.isNullOrBlank()) {
+                        partial = true
+                        boundaryIncomplete = true
+                        continue
+                    }
+                    if (previousSortValue != null && rows.isEmpty()) {
+                        val isAfterCursor = PhotoPageQueryContract.hasDescendingBoundary(
+                            currentPrimary = sortValue,
+                            currentSecondary = secondarySortValue,
+                            currentVolume = rowVolume,
+                            currentId = id,
+                            previousPrimary = previousSortValue!!,
+                            previousSecondary = previousSecondarySortValue ?: 0L,
+                            previousVolume = previousVolume.orEmpty(),
+                            previousId = previousId ?: Long.MIN_VALUE,
+                        )
+                        if (!isAfterCursor) return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false,
+                            "message" to "MediaStore returned an unstable or unpaged sort order.")
+                    }
+                    val previousBoundary = boundarySortValue?.let { primary ->
+                        PhotoPageQueryContract.hasDescendingBoundary(
+                            currentPrimary = sortValue,
+                            currentSecondary = secondarySortValue,
+                            currentVolume = rowVolume,
+                            currentId = id,
+                            previousPrimary = primary,
+                            previousSecondary = boundarySecondarySortValue ?: 0L,
+                            previousVolume = boundaryVolume.orEmpty(),
+                            previousId = boundaryId ?: Long.MIN_VALUE,
                         )
                     }
+                    if (previousBoundary == false) return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false,
+                        "message" to "MediaStore returned an unstable sort order.")
+                    boundarySortValue = sortValue
+                    boundarySecondarySortValue = secondarySortValue
+                    boundaryVolume = rowVolume
+                    boundaryId = id
+                    val rowVersion = pageVersions[rowVolume]
+                    val generationAdded = nullableLongAt(cursor, generationAddedColumn)
+                    val generationModified = nullableLongAt(cursor, generationModifiedColumn)
+                    if (rowVolume.isNullOrBlank() || rowVolume !in volumes || rowVersion.isNullOrBlank() ||
+                        generationAdded == null || generationModified == null) {
+                        partial = true
+                        continue
+                    }
+                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(rowVolume), id)
+                    val displayName = stringAt(cursor, nameColumn) ?: "Untitled photo"
+                    val relativePath = stringAt(cursor, pathColumn)
+                    val albumName = stringAt(cursor, bucketColumn)
+                    val pathHint = "${relativePath.orEmpty()} ${albumName.orEmpty()}".lowercase()
+                    val captureMillis = rawTaken.takeIf { it > 0L } ?: addedSeconds.takeIf { it > 0L }?.times(1000L)
+                    val stableId = "$uri#version=${Uri.encode(rowVersion)}&added=$generationAdded"
+                    rows.add(mapOf(
+                        "id" to stableId,
+                        "uri" to uri.toString(),
+                        "volumeName" to rowVolume,
+                        "volumeVersion" to rowVersion,
+                        "mediaId" to id,
+                        "generationAdded" to generationAdded,
+                        "generationModified" to generationModified,
+                        "title" to displayName,
+                        "album" to albumName,
+                        "relativePath" to relativePath,
+                        "dateTakenMillis" to captureMillis,
+                        "sizeBytes" to longAt(cursor, sizeColumn).takeIf { it > 0L },
+                        "screenshotHeuristic" to pathHint.contains("screenshot"),
+                        "mimeType" to stringAt(cursor, mimeColumn),
+                        "_sortValue" to sortValue,
+                        "_secondarySortValue" to secondarySortValue,
+                    ))
                 }
-            } catch (_: SecurityException) {
-                // Limited access can change while a query is running. Hidden items are never deletion evidence.
-            } catch (_: IllegalArgumentException) {
-                // A provider rejecting an optional column yields no actionable identity for that volume.
-            }
+            } ?: return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false,
+                "message" to "MediaStore did not return a photo page.")
+        } catch (_: SecurityException) {
+            return mapOf("status" to "partial", "items" to publicPhotoRows(rows), "hasMore" to false,
+                "message" to "Photo access changed while this page was loading.")
+        } catch (_: IllegalArgumentException) {
+            return mapOf("status" to "unsupported", "items" to emptyList<Any>(), "hasMore" to false,
+                "message" to "This MediaStore provider does not support safe photo paging.")
+        } catch (_: Exception) {
+            return mapOf("status" to "partial", "items" to publicPhotoRows(rows), "hasMore" to false,
+                "message" to "Some photo metadata could not be read.")
         }
-        return rows.sortedByDescending { it["dateTakenMillis"] as? Long ?: 0L }
+        if (boundaryIncomplete) hasMore = false
+        val publicRows = publicPhotoRows(rows)
+        val nextCursor = if (hasMore) {
+            JSONObject().put("mode", mode).put("filterKey", filterKey)
+                .put("snapshot", snapshotSignature).put("offset", offset + pageSize)
+                .put("lastSort", boundarySortValue)
+                .put("lastSecondarySort", boundarySecondarySortValue)
+                .put("lastVolume", boundaryVolume)
+                .put("lastId", boundaryId).toString()
+        } else null
+        return mapOf(
+            "status" to if (partial) "partial" else "ready",
+            "items" to publicRows,
+            "cursor" to nextCursor,
+            "hasMore" to hasMore,
+            "message" to if (partial) "Some rows were unavailable or lacked a stable identity." else null,
+        )
     }
+
+    private fun publicPhotoRows(rows: List<Map<String, Any?>>): List<Map<String, Any?>> =
+        rows.map { row -> row.filterKeys { it != "_sortValue" && it != "_secondarySortValue" } }
 
     /**
      * Source detail is decoded from the exact validated MediaStore URI and is capped to the

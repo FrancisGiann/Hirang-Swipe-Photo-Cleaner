@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,9 +11,53 @@ import 'package:hirang/domain/review_state.dart';
 import 'package:hirang/platform/sift_gateway.dart';
 import 'package:hirang/main.dart';
 import 'package:hirang/ui/marked_review_screen.dart';
+import 'package:hirang/ui/photo_art.dart';
+import 'package:hirang/ui/photo_viewer.dart';
 import 'package:hirang/ui/sift_home.dart';
 
 import 'support/fake_sift_gateway.dart';
+
+Future<void> _pumpPhotoUi(WidgetTester tester) async {
+  // PhotoArtwork intentionally shows an indeterminate loader while a native
+  // image request is pending; pump fixed frames instead of settling forever.
+  for (var frame = 0; frame < 6; frame++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
+Future<void> _settleViewerImageFrames(WidgetTester tester) async {
+  for (var attempt = 0; attempt < 6; attempt++) {
+    await tester.pump();
+    final providers = tester
+        .widgetList<Image>(find.byType(Image))
+        .map((image) => image.image)
+        .toSet();
+    await tester.runAsync(() async {
+      for (final provider in providers) {
+        final stream = provider.resolve(ImageConfiguration.empty);
+        final decoded = Completer<void>();
+        late final ImageStreamListener listener;
+        listener = ImageStreamListener(
+          (image, _) {
+            if (!decoded.isCompleted) decoded.complete();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              stream.removeListener(listener);
+              image.dispose();
+            });
+          },
+          onError: (Object _, StackTrace? _) {
+            stream.removeListener(listener);
+            if (!decoded.isCompleted) decoded.complete();
+          },
+        );
+        stream.addListener(listener);
+        await decoded.future.timeout(const Duration(seconds: 5));
+      }
+    });
+    await tester.pump(const Duration(milliseconds: 80));
+    if (find.byType(CircularProgressIndicator).evaluate().isEmpty) break;
+  }
+}
 
 void main() {
   testWidgets(
@@ -76,6 +122,354 @@ void main() {
     expect(find.text('No sample marks yet'), findsOneWidget);
     expect(find.text('0 selected'), findsNothing);
   });
+
+  testWidgets(
+    'marked photo opens a zoomable source-detail viewer without changing selection',
+    (tester) async {
+      tester.view.physicalSize = const Size(1080, 1920);
+      tester.view.devicePixelRatio = 3;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final bytes = File('test/fixtures/detail_generated.png')
+          .readAsBytesSync();
+      final photo = realPhoto('marked-viewer');
+      final keptPhoto = realPhoto(
+        'marked-viewer-kept',
+        mediaId: 20,
+        generationAdded: 20,
+      );
+      final filters = const ReviewFilters(
+        album: 'Previously selected album',
+        screenshotsOnly: true,
+      );
+      final savedState = ReviewState.initial()
+          .withFilters(filters)
+          .decide(photo, ReviewDecision.mark)
+          .decide(keptPhoto, ReviewDecision.keep);
+      final gateway = FakeSiftGateway()
+        ..access = const PhotoAccess(status: 'full', sdkInt: 36)
+        ..photos = [photo, keptPhoto]
+        ..thumbnailData = Uint8List.fromList(bytes)
+        ..thumbnailWidth = 1800
+        ..thumbnailHeight = 2700
+        ..saved = savedState;
+      final controller = SiftController(gateway);
+      await controller.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildHirangTheme(Brightness.light),
+          darkTheme: buildHirangTheme(Brightness.dark),
+          home: MarkedReviewScreen(controller: controller),
+        ),
+      );
+      await _pumpPhotoUi(tester);
+
+      final markedIdsBefore = controller.marked.map((item) => item.id).toList();
+      final decisionsBefore = Map<String, ReviewDecision>.of(
+        controller.state.decisions,
+      );
+      expect(markedIdsBefore, [photo.id]);
+      expect(find.text('1 selected'), findsOneWidget);
+      final openFinder = find.byKey(Key('openMarkedPhoto-${photo.id}'));
+      expect(openFinder, findsOneWidget);
+      // Invoke two events before the next frame, when an ordinary user can tap
+      // again before the pushed fullscreen route has animated on screen.
+      final openInkWell = tester.widget<InkWell>(openFinder);
+      openInkWell.onTap!();
+      openInkWell.onTap!();
+      await _pumpPhotoUi(tester);
+      await _settleViewerImageFrames(tester);
+
+      expect(find.byKey(const Key('photoViewerInteraction')), findsOneWidget);
+      expect(find.byType(PhotoFullscreenViewer), findsOneWidget);
+      expect(find.byKey(const Key('closePhotoViewer')), findsOneWidget);
+      final viewerSurface = find.byKey(const Key('photoViewerInteraction'));
+      expect(
+        find.descendant(
+          of: viewerSurface,
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(of: viewerSurface, matching: find.text('Preview only')),
+        findsNothing,
+      );
+      expect(
+        gateway.imageRequests.any(
+          (request) =>
+              request.id == photo.id &&
+              request.preferSourceDetail &&
+              request.maxEdge > 512,
+        ),
+        isTrue,
+        reason: 'The full-screen viewer must request bounded source detail.',
+      );
+      expect(
+        photoImageTargetEdge(const Size(432, 768), 3),
+        lessThanOrEqualTo(2048),
+      );
+      final artworkFinder = find.descendant(
+        of: viewerSurface,
+        matching: find.byType(PhotoArtwork),
+      );
+      final artwork = tester.widget<PhotoArtwork>(artworkFinder);
+      expect(artwork.fit, BoxFit.contain);
+      expect(artwork.maxEdge, greaterThan(512));
+      expect(artwork.maxEdge, lessThanOrEqualTo(2048));
+
+      final surface = viewerSurface;
+      final center = tester.getCenter(surface);
+      final first = await tester.startGesture(
+        center - const Offset(30, 0),
+        pointer: 1,
+      );
+      final second = await tester.startGesture(
+        center + const Offset(30, 0),
+        pointer: 2,
+      );
+      await tester.pump();
+      await first.moveTo(center - const Offset(60, 0));
+      await second.moveTo(center + const Offset(60, 0));
+      await tester.pump();
+      final viewer = tester.widget<InteractiveViewer>(surface);
+      expect(
+        viewer.transformationController!.value.getMaxScaleOnAxis(),
+        greaterThan(1.2),
+      );
+      await first.up();
+      await second.up();
+      await _pumpPhotoUi(tester);
+
+      tester.view.physicalSize = const Size(1920, 1080);
+      await tester.pump();
+      await _pumpPhotoUi(tester);
+      await _settleViewerImageFrames(tester);
+      final landscapeArtwork = tester.widget<PhotoArtwork>(artworkFinder);
+      expect(landscapeArtwork.fit, BoxFit.contain);
+      expect(landscapeArtwork.maxEdge, lessThanOrEqualTo(2048));
+      expect(
+        gateway.imageRequests
+            .where((request) => request.id == photo.id)
+            .every((request) => request.maxEdge <= 2048),
+        isTrue,
+      );
+      tester.view.physicalSize = const Size(1080, 1920);
+      await tester.pump();
+      await _pumpPhotoUi(tester);
+      await _settleViewerImageFrames(tester);
+
+      await tester.tap(find.byKey(const Key('closePhotoViewer')));
+      await _pumpPhotoUi(tester);
+      expect(controller.marked.map((item) => item.id), markedIdsBefore);
+      expect(controller.state.decisions, decisionsBefore);
+      expect(controller.state.filters.toJson(), filters.toJson());
+      expect(find.text('1 selected'), findsOneWidget);
+      expect(gateway.beginCalls, 0);
+
+      await tester.tap(find.byKey(Key('unmark-${photo.id}')));
+      await _pumpPhotoUi(tester);
+      expect(controller.marked, isEmpty);
+      expect(find.text('Nothing marked'), findsOneWidget);
+      expect(gateway.beginCalls, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'viewer back returns to the same scrolled marked grid and filter state',
+    (tester) async {
+      final filters = const ReviewFilters(
+        album: 'Retained filter',
+        screenshotsOnly: true,
+      );
+      var saved = ReviewState.initial().withDemoMode(true).withFilters(filters);
+      final photos = DemoFixtures.items.take(6).toList();
+      for (final photo in photos) {
+        saved = saved.decide(photo, ReviewDecision.mark);
+      }
+      final gateway = FakeSiftGateway()..saved = saved;
+      final controller = SiftController(gateway);
+      await controller.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildHirangTheme(Brightness.light),
+          darkTheme: buildHirangTheme(Brightness.dark),
+          home: MarkedReviewScreen(controller: controller),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final idsBefore = controller.marked.map((item) => item.id).toList();
+      final decisionsBefore = Map<String, ReviewDecision>.of(
+        controller.state.decisions,
+      );
+      final grid = find.byKey(const Key('markedGrid'));
+      final scrollable = find
+          .descendant(of: grid, matching: find.byType(Scrollable))
+          .first;
+      final scroll = tester.state<ScrollableState>(scrollable).position;
+      scroll.jumpTo(40);
+      await tester.pump();
+      final scrollBefore = scroll.pixels;
+      expect(scrollBefore, greaterThan(0));
+
+      final photo = photos[2];
+      final open = tester.widget<InkWell>(
+        find.byKey(Key('openMarkedPhoto-${photo.id}')),
+      );
+      open.onTap!();
+      open.onTap!();
+      await tester.pumpAndSettle();
+      expect(find.byType(PhotoFullscreenViewer), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      expect(controller.marked.map((item) => item.id), idsBefore);
+      expect(controller.state.decisions, decisionsBefore);
+      expect(controller.state.filters.toJson(), filters.toJson());
+      expect(find.text('6 selected'), findsOneWidget);
+      expect(
+        tester.state<ScrollableState>(scrollable).position.pixels,
+        scrollBefore,
+      );
+      expect(gateway.beginCalls, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'marked photo viewer labels a smaller fallback and retries a stale photo safely',
+    (tester) async {
+      final bytes = Uint8List.fromList(
+        File('test/fixtures/detail_generated.png').readAsBytesSync(),
+      );
+      final photo = realPhoto('marked-stale-viewer');
+      var mediaAvailable = false;
+      var detailAvailable = false;
+      final gateway = FakeSiftGateway()
+        ..access = const PhotoAccess(status: 'limited', sdkInt: 36)
+        ..photos = [photo]
+        ..photoImageLoader = (item, maxEdge, sourceDetail) async {
+          if (!mediaAvailable) return null;
+          return PhotoImageData(
+            bytes: bytes,
+            width: 1800,
+            height: 2700,
+            isSourceDetail: sourceDetail && detailAvailable,
+          );
+        }
+        ..saved = ReviewState.initial().decide(photo, ReviewDecision.mark);
+      final controller = SiftController(gateway);
+      await controller.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildHirangTheme(Brightness.light),
+          darkTheme: buildHirangTheme(Brightness.dark),
+          home: MarkedReviewScreen(controller: controller),
+        ),
+      );
+      await _pumpPhotoUi(tester);
+      await tester.tap(find.byKey(Key('openMarkedPhoto-${photo.id}')));
+      await _pumpPhotoUi(tester);
+      expect(find.text('Photo preview unavailable'), findsOneWidget);
+
+      mediaAvailable = true;
+      final viewer = find.byKey(const Key('photoViewerInteraction'));
+      await tester.tap(
+        find.descendant(
+          of: viewer,
+          matching: find.byIcon(Icons.refresh_rounded),
+        ),
+      );
+      await _pumpPhotoUi(tester);
+      await _settleViewerImageFrames(tester);
+      expect(find.text('Preview only'), findsOneWidget);
+      expect(find.byTooltip('Retry higher-detail photo'), findsOneWidget);
+
+      detailAvailable = true;
+      await tester.tap(
+        find.descendant(
+          of: viewer,
+          matching: find.byIcon(Icons.refresh_rounded),
+        ),
+      );
+      await _pumpPhotoUi(tester);
+      await _settleViewerImageFrames(tester);
+      expect(find.text('Preview only'), findsNothing);
+      expect(controller.marked.map((item) => item.id), [photo.id]);
+      expect(gateway.beginCalls, 0);
+      await tester.binding.handlePopRoute();
+      await _pumpPhotoUi(tester);
+      expect(controller.marked.map((item) => item.id), [photo.id]);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'closing during a pending detail load safely ignores the late image result',
+    (tester) async {
+      final bytes = Uint8List.fromList(
+        File('test/fixtures/detail_generated.png').readAsBytesSync(),
+      );
+      final sourceDetail = Completer<PhotoImageData?>();
+      final photo = realPhoto('marked-pending-viewer');
+      final preview = PhotoImageData(
+        bytes: bytes,
+        width: 1800,
+        height: 2700,
+        isSourceDetail: false,
+      );
+      final fullImage = PhotoImageData(
+        bytes: bytes,
+        width: 1800,
+        height: 2700,
+        isSourceDetail: true,
+      );
+      final gateway = FakeSiftGateway();
+      gateway
+        ..access = const PhotoAccess(status: 'full', sdkInt: 36)
+        ..photos = [photo]
+        ..photoImageLoader = (item, maxEdge, preferSourceDetail) async {
+          if (preferSourceDetail) return sourceDetail.future;
+          return preview;
+        }
+        ..saved = ReviewState.initial().decide(photo, ReviewDecision.mark);
+      final controller = SiftController(gateway);
+      await controller.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildHirangTheme(Brightness.light),
+          darkTheme: buildHirangTheme(Brightness.dark),
+          home: MarkedReviewScreen(controller: controller),
+        ),
+      );
+      await _pumpPhotoUi(tester);
+      await tester.tap(find.byKey(Key('openMarkedPhoto-${photo.id}')));
+      await _pumpPhotoUi(tester);
+      expect(find.byKey(const Key('photoViewerInteraction')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('photoViewerInteraction')),
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsWidgets,
+      );
+      expect(controller.marked.map((item) => item.id), [photo.id]);
+
+      await tester.binding.handlePopRoute();
+      await _pumpPhotoUi(tester);
+      sourceDetail.complete(fullImage);
+      await _pumpPhotoUi(tester);
+
+      expect(find.byKey(const Key('photoViewerInteraction')), findsNothing);
+      expect(controller.marked.map((item) => item.id), [photo.id]);
+      expect(controller.state.operation, isNull);
+      expect(gateway.beginCalls, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'trash preflight freezes its count and rejects an unmark already in flight',

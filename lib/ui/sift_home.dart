@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -13,22 +12,17 @@ import '../domain/review_state.dart';
 import '../platform/sift_gateway.dart';
 import 'appearance_settings_screen.dart';
 import 'brand_mark.dart';
+import 'cleanup_sessions_screen.dart';
 import 'marked_review_screen.dart';
 import 'onboarding_screen.dart';
 import 'operation_panel.dart';
 import 'photo_art.dart';
+import 'photo_viewer.dart';
+import 'photo_tools_screen.dart';
 
 const double swipeDecisionThreshold = 88.0;
 final RouteObserver<ModalRoute<dynamic>> photoRouteObserver =
     RouteObserver<ModalRoute<dynamic>>();
-
-int _imageTargetEdge(Size viewport, double devicePixelRatio) {
-  if (!viewport.width.isFinite || !viewport.height.isFinite) return 512;
-  final physicalEdge =
-      math.max(viewport.width, viewport.height) * devicePixelRatio;
-  // A small bucket avoids cache churn from subpixel layout changes during a resize.
-  return (((physicalEdge / 64).ceil()) * 64).clamp(512, 2048).toInt();
-}
 
 double _swipeIntentProgress(double offset) =>
     (offset.abs() / swipeDecisionThreshold).clamp(0.0, 1.0);
@@ -265,6 +259,34 @@ class _SiftHomeState extends State<SiftHome>
                 case _HomeAction.replayIntro:
                   unawaited(_replayIntroduction(context));
                   break;
+                case _HomeAction.cleanupSessions:
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          CleanupSessionsScreen(controller: controller),
+                    ),
+                  );
+                  break;
+                case _HomeAction.screenshots:
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => PhotoToolsScreen(
+                        controller: controller,
+                        initialMode: PhotoQueryMode.screenshotHints,
+                      ),
+                    ),
+                  );
+                  break;
+                case _HomeAction.largeFiles:
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => PhotoToolsScreen(
+                        controller: controller,
+                        initialMode: PhotoQueryMode.largestKnown,
+                      ),
+                    ),
+                  );
+                  break;
               }
             },
             itemBuilder: (context) => [
@@ -281,6 +303,21 @@ class _SiftHomeState extends State<SiftHome>
               const PopupMenuItem(
                 value: _HomeAction.refresh,
                 child: Text('Refresh library'),
+              ),
+              const PopupMenuItem(
+                key: Key('cleanupSessionsMenuItem'),
+                value: _HomeAction.cleanupSessions,
+                child: Text('Cleanup sessions'),
+              ),
+              const PopupMenuItem(
+                key: Key('screenshotsMenuItem'),
+                value: _HomeAction.screenshots,
+                child: Text('Screenshots cleanup'),
+              ),
+              const PopupMenuItem(
+                key: Key('largeFilesMenuItem'),
+                value: _HomeAction.largeFiles,
+                child: Text('Find large photos'),
               ),
               const PopupMenuItem(
                 key: Key('internalSettingsMenuItem'),
@@ -325,6 +362,27 @@ class _SiftHomeState extends State<SiftHome>
                         ),
                         const SizedBox(height: 12),
                         if (!controller.demoMode &&
+                            controller.access.canRead &&
+                            (controller.hasMorePhotos ||
+                                controller.photoPageStatus == 'partial' ||
+                                controller.photoPageStatus == 'unsupported' ||
+                                controller.photoPageStatus == 'error' ||
+                                controller.photoPageStatus == 'denied' ||
+                                controller.photoPageStatus == 'stale')) ...[
+                          _PhotoPageNotice(
+                            loadedCount: controller.assets.length,
+                            pageStatus: controller.photoPageStatus,
+                            hasMore: controller.hasMorePhotos,
+                            loading: controller.loadingMorePhotos,
+                            hasCurrentPhoto: current != null,
+                            onLoadMore: () =>
+                                unawaited(controller.loadMorePhotos()),
+                            onRefresh: () =>
+                                unawaited(controller.refreshFromSystem()),
+                          ),
+                          const SizedBox(height: 10),
+                        ],
+                        if (!controller.demoMode &&
                             controller.access.isLimited) ...[
                           _LimitedAccessNotice(
                             onManage: controller.loading
@@ -360,6 +418,9 @@ class _SiftHomeState extends State<SiftHome>
                             demoMode: controller.demoMode,
                             total: total,
                             hasAssets: controller.visibleAssets.isNotEmpty,
+                            hasMorePages: controller.hasMorePhotos,
+                            loadingMore: controller.loadingMorePhotos,
+                            pageStatus: controller.photoPageStatus,
                             hasMarked: controller.marked.isNotEmpty,
                             hasFilters:
                                 controller.state.filters.monthKey != null ||
@@ -372,6 +433,8 @@ class _SiftHomeState extends State<SiftHome>
                                 controller.setFilters(const ReviewFilters()),
                             onRefresh: () =>
                                 unawaited(controller.refreshFromSystem()),
+                            onLoadMore: () =>
+                                unawaited(controller.loadMorePhotos()),
                           )
                         else ...[
                           const SizedBox(height: 12),
@@ -781,6 +844,13 @@ class _FilterSheet extends StatelessWidget {
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
+              const SizedBox(height: 4),
+              Text(
+                'Month and album choices come from photos loaded so far. Load more photos to find older choices; selected-photo access may hide items.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
               const SizedBox(height: 18),
               _FilterDrop<String?>(
                 key: const Key('monthFilter'),
@@ -914,9 +984,9 @@ class _PhotoSummary extends StatelessWidget {
         ? 'Date unknown'
         : _dateLabel(item.captureDate!);
     final album = item.album ?? 'Album unknown';
-    final size = item.sizeBytes == null
+    final size = item.knownSizeBytes == null
         ? 'Size unknown'
-        : _sizeLabel(item.sizeBytes!);
+        : _sizeLabel(item.knownSizeBytes!);
     return Row(
       children: [
         Expanded(
@@ -1072,7 +1142,7 @@ class _SwipeCard extends StatelessWidget {
                 Positioned.fill(
                   child: LayoutBuilder(
                     builder: (context, constraints) {
-                      final detailMaxEdge = _imageTargetEdge(
+                      final detailMaxEdge = photoImageTargetEdge(
                         constraints.biggest,
                         MediaQuery.devicePixelRatioOf(context),
                       );
@@ -1363,11 +1433,95 @@ class _AccessCard extends StatelessWidget {
   }
 }
 
+class _PhotoPageNotice extends StatelessWidget {
+  const _PhotoPageNotice({
+    required this.loadedCount,
+    required this.pageStatus,
+    required this.hasMore,
+    required this.loading,
+    required this.hasCurrentPhoto,
+    required this.onLoadMore,
+    required this.onRefresh,
+  });
+
+  final int loadedCount;
+  final String pageStatus;
+  final bool hasMore;
+  final bool loading;
+  final bool hasCurrentPhoto;
+  final VoidCallback onLoadMore;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final warning =
+        pageStatus == 'partial' ||
+        pageStatus == 'unsupported' ||
+        pageStatus == 'error' ||
+        pageStatus == 'denied' ||
+        pageStatus == 'stale';
+    final message = switch (pageStatus) {
+      'partial' =>
+        hasMore
+            ? 'Some photos could not be checked. Review the photos shown, then continue or refresh access. Saved decisions remain.'
+            : 'Some photos could not be checked. Review counts cover only the photos shown; refresh access to try again. Saved decisions remain.',
+      'unsupported' => 'Could not load this photo list safely. Refresh to retry; saved decisions remain.',
+      'error' => 'Could not check this photo list safely. Refresh to retry; saved decisions remain.',
+      'denied' => 'Photo access changed while loading this list. Choose photo access or refresh; saved decisions remain.',
+      'stale' => 'This photo list changed while loading. Refresh to try again; saved decisions remain.',
+      _ =>
+        'Showing $loadedCount photos loaded in this page. More accessible photos remain to check.',
+    };
+    return Card(
+      margin: EdgeInsets.zero,
+      color: warning ? theme.colorScheme.errorContainer : null,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(message, style: theme.textTheme.bodySmall),
+            if (hasMore && hasCurrentPhoto) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('continuePhotoPageButton'),
+                onPressed: loading ? null : onLoadMore,
+                icon: loading
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.expand_more_rounded),
+                label: Text(
+                  loading ? 'Loading next page' : 'Continue to next page',
+                ),
+              ),
+            ] else if (!hasMore && pageStatus != 'ready')
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  key: const Key('refreshPhotoPageButton'),
+                  onPressed: onRefresh,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Refresh library'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CaughtUpCard extends StatelessWidget {
   const _CaughtUpCard({
     required this.demoMode,
     required this.total,
     required this.hasAssets,
+    required this.hasMorePages,
+    required this.loadingMore,
+    required this.pageStatus,
     required this.hasMarked,
     required this.hasFilters,
     required this.undoEnabled,
@@ -1375,10 +1529,14 @@ class _CaughtUpCard extends StatelessWidget {
     required this.onOpenMarked,
     required this.onResetFilters,
     required this.onRefresh,
+    required this.onLoadMore,
   });
   final bool demoMode;
   final int total;
   final bool hasAssets;
+  final bool hasMorePages;
+  final bool loadingMore;
+  final String pageStatus;
   final bool hasMarked;
   final bool hasFilters;
   final bool undoEnabled;
@@ -1386,25 +1544,38 @@ class _CaughtUpCard extends StatelessWidget {
   final VoidCallback onOpenMarked;
   final VoidCallback onResetFilters;
   final VoidCallback onRefresh;
+  final VoidCallback onLoadMore;
 
   @override
   Widget build(BuildContext context) {
     final emptyFilteredView = total == 0 && hasFilters;
     final noAvailablePhotos = total == 0 && !hasAssets && !hasFilters;
-    final title = total > 0
+    final title = pageStatus == 'partial'
+        ? 'This page may be incomplete'
+        : hasMorePages
+        ? total > 0
+              ? 'Current page reviewed'
+              : 'No unreviewed photos on this page'
+        : total > 0
         ? 'You’re all caught up'
         : emptyFilteredView
         ? 'Nothing in this view'
         : noAvailablePhotos
         ? 'No photos available yet'
         : 'No photos to review right now';
-    final detail = total > 0
+    final detail = pageStatus == 'partial'
+        ? 'Some photos could not be checked. Review counts cover only photos shown. Continue to another page or refresh access; saved decisions remain.'
+        : hasMorePages
+        ? total > 0
+              ? 'You have reviewed the photos loaded so far. More accessible photos remain; continue to the next page. Progress covers photos loaded so far.'
+              : 'No unreviewed photos were returned in this page. More accessible photos may remain; continue to the next page.'
+        : total > 0
         ? 'Your decisions are saved on this device. Review marked photos whenever you’re ready.'
         : emptyFilteredView
         ? 'Try another month or album, or reset the filters.'
         : noAvailablePhotos
         ? 'No photos are currently available in the library Hirang can read. Refresh or choose more photos from Photo options.'
-        : 'There are no unreviewed photos in this view. Refresh the library or change its filters.';
+        : 'There are no unreviewed photos in the loaded view. Refresh the library or change its filters.';
     return Card(
       margin: const EdgeInsets.only(top: 12),
       child: Padding(
@@ -1439,6 +1610,20 @@ class _CaughtUpCard extends StatelessWidget {
                 onPressed: onUndo,
                 icon: const Icon(Icons.undo_rounded),
                 label: const Text('Undo last decision'),
+              ),
+            if (hasMorePages)
+              FilledButton.icon(
+                key: const Key('loadNextPhotoPageButton'),
+                onPressed: loadingMore ? null : onLoadMore,
+                icon: loadingMore
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.expand_more_rounded),
+                label: Text(
+                  loadingMore ? 'Loading next page' : 'Load next page',
+                ),
               ),
             if (noAvailablePhotos && !hasMarked)
               FilledButton.icon(
@@ -1629,6 +1814,9 @@ enum _HomeAction {
   settings,
   howItWorks,
   replayIntro,
+  cleanupSessions,
+  screenshots,
+  largeFiles,
 }
 
 Future<void> _showPhotoDetails(
@@ -1658,7 +1846,9 @@ Future<void> _showPhotoDetails(
           ),
           _DetailLine(
             'Estimated size',
-            item.sizeBytes == null ? 'Unknown' : _sizeLabel(item.sizeBytes!),
+            item.knownSizeBytes == null
+                ? 'Unknown'
+                : _sizeLabel(item.knownSizeBytes!),
           ),
           if (item.screenshotHeuristic)
             const _DetailLine(
@@ -1687,76 +1877,11 @@ Future<void> _showPhotoDetails(
     ),
   );
   if (viewLarger != true || !context.mounted) return;
-  await showDialog<void>(
-    context: context,
-    builder: (_) =>
-        _PhotoLargerDialog(item: item, demoMode: demoMode, gateway: gateway),
-  );
-}
-
-class _PhotoLargerDialog extends StatelessWidget {
-  const _PhotoLargerDialog({
-    required this.item,
-    required this.demoMode,
-    required this.gateway,
-  });
-
-  final PhotoAsset item;
-  final bool demoMode;
-  final SiftGateway gateway;
-
-  @override
-  Widget build(BuildContext context) => Dialog.fullscreen(
-    child: Scaffold(
-      appBar: AppBar(
-        title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        leading: IconButton(
-          tooltip: 'Close photo preview',
-          onPressed: () => Navigator.pop(context),
-          icon: const Icon(Icons.close_rounded),
-        ),
-      ),
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) => PhotoArtwork(
-                      item: item,
-                      demoMode: demoMode,
-                      gateway: gateway,
-                      fit: BoxFit.contain,
-                      maxEdge: _imageTargetEdge(
-                        constraints.biggest,
-                        MediaQuery.devicePixelRatioOf(context),
-                      ),
-                      preferSourceDetail: !demoMode,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-              child: Text(
-                demoMode
-                    ? 'Generated sample · no library photo is used'
-                    : 'Private preview · image stays on this device',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
+  await showPhotoFullscreen(
+    context,
+    item: item,
+    demoMode: demoMode,
+    gateway: gateway,
   );
 }
 

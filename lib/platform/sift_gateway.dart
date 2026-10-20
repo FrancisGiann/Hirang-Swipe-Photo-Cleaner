@@ -3,6 +3,46 @@ import 'package:flutter/services.dart';
 import '../app/brand.dart';
 import '../domain/review_state.dart';
 
+enum PhotoQueryMode { recent, largestKnown, unknownSize, screenshotHints }
+
+bool photoMatchesQueryMode(PhotoQueryMode mode, PhotoAsset item) =>
+    switch (mode) {
+      PhotoQueryMode.recent => true,
+      PhotoQueryMode.largestKnown => item.knownSizeBytes != null,
+      PhotoQueryMode.unknownSize => item.knownSizeBytes == null,
+      PhotoQueryMode.screenshotHints => item.screenshotHeuristic,
+    };
+
+class PhotoPage {
+  const PhotoPage({
+    required this.items,
+    required this.status,
+    this.cursor,
+    this.hasMore = false,
+    this.message,
+  });
+
+  final List<PhotoAsset> items;
+  final String status;
+  final String? cursor;
+  final bool hasMore;
+  final String? message;
+
+  bool get isSupported => status == 'ready' || status == 'partial';
+  bool get isPartial => status == 'partial';
+}
+
+/// Optional paging capability. Keeping this separate lets demo and external
+/// gateway implementations retain the original SiftGateway contract.
+abstract interface class PagedPhotoGateway {
+  Future<PhotoPage> queryPhotoPage({
+    required PhotoQueryMode mode,
+    required int pageSize,
+    String? cursor,
+    ReviewFilters filters = const ReviewFilters(),
+  });
+}
+
 class PhotoAccess {
   const PhotoAccess({required this.status, required this.sdkInt});
 
@@ -35,6 +75,7 @@ class PhotoImageData {
   final Uint8List bytes;
   final int width;
   final int height;
+
   /// False means Android could provide only a smaller provider-generated preview.
   final bool isSourceDetail;
 }
@@ -71,7 +112,7 @@ abstract interface class SiftGateway {
   Future<void> clearTrashOperation(String operationId);
 }
 
-class PlatformSiftGateway implements SiftGateway {
+class PlatformSiftGateway implements SiftGateway, PagedPhotoGateway {
   static const MethodChannel _channel = MethodChannel('app.hirang/media');
 
   Future<Object?> _invoke(String method, [Map<String, Object?>? arguments]) =>
@@ -114,6 +155,35 @@ class PlatformSiftGateway implements SiftGateway {
         .whereType<Map<Object?, Object?>>()
         .map((row) => PhotoAsset.fromJson(Map<String, Object?>.from(row)))
         .toList(growable: false);
+  }
+
+  @override
+  Future<PhotoPage> queryPhotoPage({
+    required PhotoQueryMode mode,
+    required int pageSize,
+    String? cursor,
+    ReviewFilters filters = const ReviewFilters(),
+  }) async {
+    final result = await _invoke('queryPhotoPage', {
+      'mode': mode.name,
+      'pageSize': pageSize.clamp(1, 80).toInt(),
+      'cursor': cursor,
+      'filters': filters.toJson(),
+    });
+    if (result is! Map<Object?, Object?>) {
+      return const PhotoPage(items: [], status: 'unsupported');
+    }
+    final rows = result['items'] as List<Object?>? ?? const [];
+    return PhotoPage(
+      items: rows
+          .whereType<Map<Object?, Object?>>()
+          .map((row) => PhotoAsset.fromJson(Map<String, Object?>.from(row)))
+          .toList(growable: false),
+      status: result['status']?.toString() ?? 'error',
+      cursor: result['cursor'] as String?,
+      hasMore: result['hasMore'] == true,
+      message: result['message']?.toString(),
+    );
   }
 
   @override

@@ -1239,58 +1239,72 @@ class PhotoPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
+      final tiny = constraints.maxHeight < 96 || constraints.maxWidth < 72;
       final compact = constraints.maxHeight < 210 || constraints.maxWidth < 220;
       final textTheme = Theme.of(context).textTheme;
       return ColoredBox(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         child: Center(
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: compact ? 24 : 38),
-                SizedBox(height: compact ? 4 : 8),
-                Text(
-                  title,
-                  maxLines: compact ? 1 : 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: compact ? textTheme.labelSmall : null,
-                ),
-                if (message != null) ...[
-                  SizedBox(height: compact ? 2 : 4),
-                  Text(
-                    compact ? 'Preview unavailable' : message!,
-                    maxLines: compact ? 1 : 2,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodySmall,
-                  ),
-                ],
-                if (onRetry != null) ...[
-                  SizedBox(height: compact ? 2 : 4),
-                  if (compact)
-                    IconButton(
-                      tooltip: 'Retry photo preview',
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(
-                        minWidth: 40,
-                        minHeight: 40,
+          child: tiny
+              ? onRetry == null
+                    ? Icon(icon, size: 16)
+                    : IconButton(
+                        tooltip: 'Retry photo preview',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
+                        onPressed: onRetry,
+                        icon: const Icon(Icons.refresh_rounded),
+                      )
+              : Padding(
+                  padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(icon, size: compact ? 24 : 38),
+                      SizedBox(height: compact ? 4 : 8),
+                      Text(
+                        title,
+                        maxLines: compact ? 1 : 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: compact ? textTheme.labelSmall : null,
                       ),
-                      onPressed: onRetry,
-                      icon: const Icon(Icons.refresh_rounded),
-                    )
-                  else
-                    TextButton.icon(
-                      onPressed: onRetry,
-                      icon: const Icon(Icons.refresh_rounded),
-                      label: const Text('Retry'),
-                    ),
-                ],
-              ],
-            ),
-          ),
+                      if (message != null) ...[
+                        SizedBox(height: compact ? 2 : 4),
+                        Text(
+                          compact ? 'Preview unavailable' : message!,
+                          maxLines: compact ? 1 : 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodySmall,
+                        ),
+                      ],
+                      if (onRetry != null) ...[
+                        SizedBox(height: compact ? 2 : 4),
+                        if (compact)
+                          IconButton(
+                            tooltip: 'Retry photo preview',
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(
+                              minWidth: 40,
+                              minHeight: 40,
+                            ),
+                            onPressed: onRetry,
+                            icon: const Icon(Icons.refresh_rounded),
+                          )
+                        else
+                          TextButton.icon(
+                            onPressed: onRetry,
+                            icon: const Icon(Icons.refresh_rounded),
+                            label: const Text('Retry'),
+                          ),
+                      ],
+                    ],
+                  ),
+                ),
         ),
       );
     },

@@ -39,6 +39,8 @@ class PhotoAsset {
   final int? demoIndex;
 
   bool get isDemo => demoIndex != null;
+  int? get knownSizeBytes =>
+      sizeBytes != null && sizeBytes! > 0 ? sizeBytes : null;
   bool hasSameStableIdentity(PhotoAsset other) =>
       !isDemo &&
       !other.isDemo &&
@@ -149,6 +151,140 @@ class ReviewFilters {
 
 enum ReviewDecision { keep, mark }
 
+enum CleanupSessionKind { photos, screenshots }
+
+enum CleanupSessionStatus { active, finished }
+
+enum CleanupAvailability { available, unconfirmed }
+
+/// Frozen, bounded membership for a cleanup batch. Decisions remain in the
+/// review journal; this snapshot only records which identities belong to it.
+class CleanupSession {
+  CleanupSession({
+    required this.id,
+    required this.createdAtMillis,
+    required this.demoMode,
+    required this.kind,
+    required List<PhotoAsset> items,
+    required Map<String, CleanupAvailability> availability,
+    this.monthKey,
+    this.status = CleanupSessionStatus.active,
+    this.finishedAtMillis,
+    this.sourcePagePartial = false,
+  }) : items = List.unmodifiable(items),
+       availability = Map.unmodifiable(availability);
+
+  final String id;
+  final int createdAtMillis;
+  final bool demoMode;
+  final CleanupSessionKind kind;
+  final String? monthKey;
+  final List<PhotoAsset> items;
+  final Map<String, CleanupAvailability> availability;
+  final CleanupSessionStatus status;
+  final int? finishedAtMillis;
+  final bool sourcePagePartial;
+
+  bool get isActive => status == CleanupSessionStatus.active;
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'createdAtMillis': createdAtMillis,
+    'demoMode': demoMode,
+    'kind': kind.name,
+    'monthKey': monthKey,
+    'items': items.map((item) => item.toJson()).toList(growable: false),
+    'availability': availability.map((key, value) => MapEntry(key, value.name)),
+    'status': status.name,
+    'finishedAtMillis': finishedAtMillis,
+    'sourcePagePartial': sourcePagePartial,
+  };
+
+  factory CleanupSession.fromJson(Map<String, Object?> json) {
+    final id = json['id'];
+    final rawItems = json['items'];
+    final rawAvailability = json['availability'];
+    if (id is! String ||
+        id.isEmpty ||
+        json['createdAtMillis'] is! num ||
+        json['demoMode'] is! bool ||
+        rawItems is! List ||
+        rawItems.isEmpty ||
+        rawItems.length > 20 ||
+        rawAvailability is! Map) {
+      throw const FormatException('Invalid optional cleanup session.');
+    }
+    final kindName = json['kind'];
+    final kind = CleanupSessionKind.values.where(
+      (value) => value.name == kindName,
+    );
+    final statusName = json['status'];
+    final status = CleanupSessionStatus.values.where(
+      (value) => value.name == statusName,
+    );
+    if (kind.isEmpty || status.isEmpty) {
+      throw const FormatException('Invalid optional cleanup session.');
+    }
+    final rawPartial = json['sourcePagePartial'];
+    if (rawPartial != null && rawPartial is! bool) {
+      throw const FormatException('Invalid optional cleanup session.');
+    }
+    final items = rawItems
+        .map(
+          (item) => PhotoAsset.fromJson(Map<String, Object?>.from(item as Map)),
+        )
+        .toList(growable: false);
+    final ids = items.map((item) => item.id).toSet();
+    if (ids.length != items.length ||
+        items.any((item) => item.isDemo != json['demoMode'])) {
+      throw const FormatException(
+        'Invalid optional cleanup session identities.',
+      );
+    }
+    final availability = <String, CleanupAvailability>{};
+    for (final entry in rawAvailability.entries) {
+      final key = entry.key.toString();
+      final values = CleanupAvailability.values.where(
+        (value) => value.name == entry.value,
+      );
+      if (!ids.contains(key) || values.isEmpty) {
+        throw const FormatException('Invalid optional cleanup availability.');
+      }
+      availability[key] = values.first;
+    }
+    return CleanupSession(
+      id: id,
+      createdAtMillis: (json['createdAtMillis'] as num).toInt(),
+      demoMode: json['demoMode'] as bool,
+      kind: kind.first,
+      monthKey: json['monthKey'] as String?,
+      items: items,
+      availability: availability,
+      status: status.first,
+      finishedAtMillis: (json['finishedAtMillis'] as num?)?.toInt(),
+      sourcePagePartial: rawPartial as bool? ?? false,
+    );
+  }
+
+  CleanupSession copyWith({
+    Map<String, CleanupAvailability>? availability,
+    CleanupSessionStatus? status,
+    int? finishedAtMillis,
+    bool? sourcePagePartial,
+  }) => CleanupSession(
+    id: id,
+    createdAtMillis: createdAtMillis,
+    demoMode: demoMode,
+    kind: kind,
+    monthKey: monthKey,
+    items: items,
+    availability: availability ?? this.availability,
+    status: status ?? this.status,
+    finishedAtMillis: finishedAtMillis ?? this.finishedAtMillis,
+    sourcePagePartial: sourcePagePartial ?? this.sourcePagePartial,
+  );
+}
+
 enum OperationItemOutcome { pending, trashed, stillPresent, unknown, cancelled }
 
 class TrashOperation {
@@ -252,6 +388,9 @@ class ReviewState {
     this.appliedTrashOutcomes = const {},
     this.undoHistory = const [],
     this.operation,
+    this.cleanupSession,
+    this.cleanupPageCursor,
+    this.cleanupCursorScope,
   });
 
   final bool demoMode;
@@ -266,6 +405,9 @@ class ReviewState {
   final Map<String, Set<String>> appliedTrashOutcomes;
   final List<String> undoHistory;
   final TrashOperation? operation;
+  final CleanupSession? cleanupSession;
+  final String? cleanupPageCursor;
+  final String? cleanupCursorScope;
 
   /// The most recent undo entry in the active deck, unless frozen by a
   /// pending system trash request.
@@ -292,7 +434,7 @@ class ReviewState {
       final rawAppliedTrashOutcomes =
           json['appliedTrashOutcomes'] as Map? ?? const {};
       final rawOperation = json['operation'];
-      return ReviewState(
+      final decoded = ReviewState(
         demoMode: json['demoMode'] as bool? ?? false,
         // Additive migration: older version-1 snapshots keep every decision and
         // journal, while new users see the first-run introduction.
@@ -332,6 +474,38 @@ class ReviewState {
             ? TrashOperation.fromJson(Map<String, Object?>.from(rawOperation))
             : null,
       );
+      CleanupSession? cleanupSession;
+      try {
+        final rawSession = json['cleanupSession'];
+        if (rawSession is Map) {
+          cleanupSession = CleanupSession.fromJson(
+            Map<String, Object?>.from(rawSession),
+          );
+        }
+      } on Object {
+        // Optional tool state must never discard existing review decisions or
+        // the native trash journal when its own payload is damaged.
+      }
+      String? cleanupPageCursor;
+      String? cleanupCursorScope;
+      try {
+        final rawCursor = json['cleanupPageCursor'];
+        final rawScope = json['cleanupCursorScope'];
+        if (rawCursor is String &&
+            rawCursor.length <= 8192 &&
+            rawScope is String &&
+            rawScope.length <= 256) {
+          cleanupPageCursor = rawCursor.isEmpty ? null : rawCursor;
+          cleanupCursorScope = rawScope.isEmpty ? null : rawScope;
+        }
+      } on Object {
+        // A bad optional paging token must not reset saved review state.
+      }
+      return decoded.copyWith(
+        cleanupSession: cleanupSession,
+        cleanupPageCursor: cleanupPageCursor,
+        cleanupCursorScope: cleanupCursorScope,
+      );
     } on Object {
       return ReviewState.initial();
     }
@@ -354,6 +528,9 @@ class ReviewState {
     },
     'undoHistory': undoHistory,
     'operation': operation?.toJson(),
+    'cleanupSession': cleanupSession?.toJson(),
+    'cleanupPageCursor': cleanupPageCursor,
+    'cleanupCursorScope': cleanupCursorScope,
   });
 
   ReviewState copyWith({
@@ -368,6 +545,11 @@ class ReviewState {
     List<String>? undoHistory,
     TrashOperation? operation,
     bool clearOperation = false,
+    CleanupSession? cleanupSession,
+    bool clearCleanupSession = false,
+    String? cleanupPageCursor,
+    String? cleanupCursorScope,
+    bool clearCleanupCursor = false,
   }) => ReviewState(
     demoMode: demoMode ?? this.demoMode,
     onboardingComplete: onboardingComplete ?? this.onboardingComplete,
@@ -379,10 +561,102 @@ class ReviewState {
     appliedTrashOutcomes: appliedTrashOutcomes ?? this.appliedTrashOutcomes,
     undoHistory: undoHistory ?? this.undoHistory,
     operation: clearOperation ? null : operation ?? this.operation,
+    cleanupSession: clearCleanupSession
+        ? null
+        : cleanupSession ?? this.cleanupSession,
+    cleanupPageCursor: clearCleanupCursor
+        ? null
+        : cleanupPageCursor ?? this.cleanupPageCursor,
+    cleanupCursorScope: clearCleanupCursor
+        ? null
+        : cleanupCursorScope ?? this.cleanupCursorScope,
   );
 
   ReviewState withDemoMode(bool value) => copyWith(demoMode: value);
   ReviewState withFilters(ReviewFilters value) => copyWith(filters: value);
+
+  ReviewState startCleanupSession({
+    required String sessionId,
+    required int nowMillis,
+    required CleanupSessionKind kind,
+    required List<PhotoAsset> items,
+    required String? nextCursor,
+    required String cursorScope,
+    bool sourcePagePartial = false,
+    String? monthKey,
+  }) {
+    if (cleanupSession?.isActive == true) {
+      throw StateError('Finish or resume the active cleanup session first.');
+    }
+    if (items.isEmpty || items.length > 20) {
+      throw StateError(
+        'A cleanup session must contain between 1 and 20 photos.',
+      );
+    }
+    final unique = <String>{};
+    for (final item in items) {
+      if (item.isDemo != demoMode ||
+          decisions.containsKey(item.id) ||
+          terminalTrashedIds.contains(item.id) ||
+          !unique.add(item.id) ||
+          (kind == CleanupSessionKind.screenshots &&
+              !item.screenshotHeuristic)) {
+        throw StateError('The cleanup session contains an ineligible photo.');
+      }
+    }
+    return copyWith(
+      cleanupPageCursor: nextCursor,
+      cleanupCursorScope: cursorScope,
+      clearCleanupCursor: nextCursor == null,
+      cleanupSession: CleanupSession(
+        id: sessionId,
+        createdAtMillis: nowMillis,
+        demoMode: demoMode,
+        kind: kind,
+        monthKey: monthKey,
+        items: items,
+        availability: {
+          for (final item in items) item.id: CleanupAvailability.available,
+        },
+        sourcePagePartial: sourcePagePartial,
+      ),
+    );
+  }
+
+  ReviewState setCleanupPageCursor(String? cursor, String scope) => copyWith(
+    cleanupPageCursor: cursor,
+    cleanupCursorScope: cursor == null ? null : scope,
+    clearCleanupCursor: cursor == null,
+  );
+
+  ReviewState updateCleanupAvailability(
+    String sessionId,
+    Map<String, CleanupAvailability> availability,
+  ) {
+    final session = cleanupSession;
+    if (session == null || !session.isActive || session.id != sessionId) {
+      return this;
+    }
+    final members = session.items.map((item) => item.id).toSet();
+    final next = Map<String, CleanupAvailability>.from(session.availability);
+    for (final entry in availability.entries) {
+      if (members.contains(entry.key)) next[entry.key] = entry.value;
+    }
+    return copyWith(cleanupSession: session.copyWith(availability: next));
+  }
+
+  ReviewState finishCleanupSession(String sessionId, int nowMillis) {
+    final session = cleanupSession;
+    if (session == null || !session.isActive || session.id != sessionId) {
+      return this;
+    }
+    return copyWith(
+      cleanupSession: session.copyWith(
+        status: CleanupSessionStatus.finished,
+        finishedAtMillis: nowMillis,
+      ),
+    );
+  }
 
   /// Reopens only an exact, previously confirmed identity returned by the
   /// current accessible non-trashed MediaStore query. Absence is never evidence.

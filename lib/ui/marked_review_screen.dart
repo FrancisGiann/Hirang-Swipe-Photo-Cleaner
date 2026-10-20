@@ -5,6 +5,7 @@ import '../app/sift_controller.dart';
 import '../domain/review_state.dart';
 import 'operation_panel.dart';
 import 'photo_art.dart';
+import 'photo_viewer.dart';
 
 class MarkedReviewScreen extends StatefulWidget {
   const MarkedReviewScreen({super.key, required this.controller});
@@ -17,7 +18,23 @@ class MarkedReviewScreen extends StatefulWidget {
 
 class _MarkedReviewScreenState extends State<MarkedReviewScreen> {
   bool _checking = false;
+  bool _photoViewerOpen = false;
   SiftController get controller => widget.controller;
+
+  Future<void> _openPhoto(PhotoAsset item) async {
+    if (_photoViewerOpen || !mounted) return;
+    _photoViewerOpen = true;
+    try {
+      await showPhotoFullscreen(
+        context,
+        item: item,
+        demoMode: controller.demoMode,
+        gateway: controller.gateway,
+      );
+    } finally {
+      if (mounted) _photoViewerOpen = false;
+    }
+  }
 
   @override
   void initState() {
@@ -40,9 +57,11 @@ class _MarkedReviewScreenState extends State<MarkedReviewScreen> {
     final theme = Theme.of(context);
     final marked = controller.marked;
     final knownBytes = marked
-        .where((item) => item.sizeBytes != null)
-        .fold<int>(0, (sum, item) => sum + item.sizeBytes!);
-    final unknownSizes = marked.where((item) => item.sizeBytes == null).length;
+        .where((item) => item.knownSizeBytes != null)
+        .fold<int>(0, (sum, item) => sum + item.knownSizeBytes!);
+    final unknownSizes = marked
+        .where((item) => item.knownSizeBytes == null)
+        .length;
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => Scaffold(
@@ -132,10 +151,21 @@ class _MarkedReviewScreenState extends State<MarkedReviewScreen> {
                                   child: Stack(
                                     fit: StackFit.expand,
                                     children: [
-                                      PhotoArtwork(
-                                        item: item,
-                                        demoMode: controller.demoMode,
-                                        gateway: controller.gateway,
+                                      Semantics(
+                                        button: true,
+                                        label: 'Open ${item.title}',
+                                        hint: 'View full-screen and zoom',
+                                        child: InkWell(
+                                          key: Key(
+                                            'openMarkedPhoto-${item.id}',
+                                          ),
+                                          onTap: () => _openPhoto(item),
+                                          child: PhotoArtwork(
+                                            item: item,
+                                            demoMode: controller.demoMode,
+                                            gateway: controller.gateway,
+                                          ),
+                                        ),
                                       ),
                                       Positioned(
                                         top: 6,
@@ -188,7 +218,7 @@ class _MarkedReviewScreenState extends State<MarkedReviewScreen> {
                                       ),
                                       const SizedBox(height: 3),
                                       Text(
-                                        '${item.album ?? 'Album unknown'} · ${item.sizeBytes == null ? 'Size unknown' : _sizeLabel(item.sizeBytes!)}',
+                                        '${item.album ?? 'Album unknown'} · ${item.knownSizeBytes == null ? 'Size unknown' : _sizeLabel(item.knownSizeBytes!)}',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: theme.textTheme.bodySmall,

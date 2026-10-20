@@ -363,7 +363,7 @@ void main() {
       await tester.tap(find.byKey(const Key('viewPhotoLargerButton')));
       await _settleImages(tester);
       await tester.pumpAndSettle();
-      expect(find.byTooltip('Close photo preview'), findsOneWidget);
+      expect(find.byTooltip('Close photo viewer'), findsOneWidget);
       expect(gateway.imageRequests.length, greaterThanOrEqualTo(2));
       expect(gateway.imageRequests.last.preferSourceDetail, isTrue);
       expect(gateway.imageRequests.last.maxEdge, lessThanOrEqualTo(2048));
